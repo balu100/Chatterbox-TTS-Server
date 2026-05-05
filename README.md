@@ -1001,15 +1001,15 @@ The primary endpoint for TTS generation is `/tts`, which offers detailed control
         *   `voice_mode` (string, "predefined" or "clone", default "predefined"): Specifies voice source.
         *   `predefined_voice_id` (string, optional): Filename of predefined voice (if `voice_mode` is "predefined").
         *   `reference_audio_filename` (string, optional): Filename of reference audio (if `voice_mode` is "clone").
-        *   `output_format` (string, "wav", "opus", "mp3", or "pcm", default "wav").
+        *   `output_format` (string, "wav" or "opus", default "wav").
         *   `split_text` (boolean, default True): Whether to chunk long text.
         *   `chunk_size` (integer, default 120): Target characters per chunk.
         *   `temperature`, `exaggeration`, `cfg_weight`, `seed`, `speed_factor`, `language`: Generation parameters overriding defaults.
-    *   **Response:** Streaming audio (`audio/wav`, `audio/opus`, `audio/mp3`, or raw `audio/pcm`).
+    *   **Response:** Streaming audio (`audio/wav` or `audio/opus`).
 *   **`/v1/audio/speech` (POST):** OpenAI-compatible.
     *   `input`: Text.
     *   `voice`: 'S1', 'S2', 'dialogue', 'predefined_voice_filename.wav', or 'reference_filename.wav'.
-    *   `response_format`: 'wav', 'opus', 'mp3', or 'pcm'. PCM is raw 24 kHz, signed 16-bit little-endian mono audio without a WAV header and is sent as 20 ms frames while text chunks are synthesized.
+    *   `response_format`: 'opus' or 'wav'.
     *   `speed`: Playback speed factor (0.5-2.0).
     *   `seed`: (Optional) Integer seed, -1 for random.    
 *   **Helper Endpoints (mostly for UI):**

@@ -224,7 +224,7 @@ def encode_audio(
     Args:
         audio_array: NumPy array containing audio data (expected as float32, range [-1, 1]).
         sample_rate: Sample rate of the input audio data.
-        output_format: Desired output format ('opus', 'wav', 'mp3', or 'pcm').
+        output_format: Desired output format ('opus', 'wav', 'mp3', or raw 'pcm').
         target_sample_rate: Optional target sample rate to resample to before encoding.
 
     Returns:
@@ -344,10 +344,10 @@ def encode_audio(
             audio_clipped = np.clip(audio_array, -1.0, 1.0)
             audio_int16 = (audio_clipped * 32767).astype(np.int16)
             audio_segment = AudioSegment(
-                audio_int16.tobytes(),
-                frame_rate=rate_to_write,
-                sample_width=2,
-                channels=1,
+            audio_int16.tobytes(),
+            frame_rate=sample_rate,
+            sample_width=2,
+            channels=1,
             )
             audio_segment.export(output_buffer, format="mp3")
 

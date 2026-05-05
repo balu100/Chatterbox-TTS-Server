@@ -454,7 +454,7 @@ The following table describes the main sections and some key parameters you migh
 |                       | `seed`                        | integer       | Random seed for generation. `0` often means random/engine default.                                            | `0`                      |
 |                       | `speed_factor`                | float         | Playback speed factor (0.25-4.0). `1.0` is normal.                                                            | `1.0`                    |
 |                       | `language`                    | string        | Default language code (e.g., `en`). Primarily for UI, engine may infer.                                       | `en`                     |
-| **`audio_output`**    | `format`                      | string        | Default output audio format (e.g., `wav`, `opus`, `mp3`, `pcm`).                                               | `wav`                    |
+| **`audio_output`**    | `format`                      | string        | Default output audio format (e.g., `wav`, `opus`).                                                            | `wav`                    |
 |                       | `sample_rate`                 | integer       | Target sample rate for output audio files (e.g., `24000`, `48000`). Resampling applied if needed.              | `24000`                  |
 |                       | `max_reference_duration_sec`  | integer       | Maximum duration for reference audio files for cloning.                                                       | `30`                     |
 | **`ui_state`**        | `last_text`                   | string        | Last text entered in the UI.                                                                                  | `""`                     |
@@ -641,7 +641,7 @@ An expandable section that displays current server configuration values loaded f
 #### 8.1.7 Generated Audio Player
 *   Appears below the main form after successful audio generation.
 *   Uses **WaveSurfer.js** to display an interactive waveform.
-*   Includes Play/Pause button, a Download link for the generated audio file, and information about the generation (voice mode, file used, generation time, audio duration).
+*   Includes Play/Pause button, a Download link for the generated audio file (WAV or Opus), and information about the generation (voice mode, file used, generation time, audio duration).
 
 #### 8.1.8 Theme Toggle
 *   A button (usually in the navigation bar) to switch between light and dark UI themes. The preference is saved in the browser's local storage and also synced to `ui_state.theme` in `config.yaml`.
@@ -667,7 +667,7 @@ This endpoint is designed to be compatible with the basic OpenAI TTS API structu
     | `model`           | string  | No       | Model identifier. Often ignored by self-hosted servers as they use a fixed engine. Can be included for compatibility.                                                    | `chatterbox` (example) |
     | `input`           | string  | Yes      | The plain text to be synthesized.                                                                                                                                        |                       |
     | `voice`           | string  | No       | Specifies the voice. This would map to either a predefined voice filename (e.g., `"default_sample.wav"`) or a reference audio filename for cloning (e.g., `"my_clone.mp3"`). | Engine default/config |
-    | `response_format` | string  | No       | Desired audio output format. Supported: `"wav"`, `"opus"`, `"mp3"`, `"pcm"`. PCM is raw 24 kHz, signed 16-bit little-endian mono audio without a WAV header and is sent as 20 ms frames while text chunks are synthesized. | `"wav"` (from config) |
+    | `response_format` | string  | No       | Desired audio output format. Supported: `"wav"`, `"opus"`.                                                                                                               | `"wav"` (from config) |
     | `speed`           | float   | No       | Playback speed factor (e.g., 0.5 to 2.0). Applied post-generation.                                                                                                       | `1.0`                 |
     | `seed`            | integer | No       | Generation seed for reproducibility. `0` or absent might use default engine randomness.                                                                                  | `0` (from config)     |
 
@@ -679,7 +679,7 @@ This endpoint is designed to be compatible with the basic OpenAI TTS API structu
     *   Generation parameters like temperature, exaggeration, cfg_weight would use server defaults from `config.yaml` as they are not standard OpenAI API fields.
     *   The `speed` and `seed` parameters, if provided, would be used.
 *   **Response:**
-    *   **Success (200 OK):** `StreamingResponse` containing binary audio data (media type `audio/wav`, `audio/opus`, `audio/mp3`, or raw `audio/pcm`). PCM responses start immediately and send 20 ms frames from each synthesized text chunk; the first speech bytes still wait for the first Chatterbox synthesis call.
+    *   **Success (200 OK):** `StreamingResponse` containing binary audio data (media type `audio/wav` or `audio/opus`).
     *   **Error:** Standard FastAPI JSON error response (e.g., 400, 404, 500).
 
 #### 8.2.3 POST `/tts` (Custom Parameters)
@@ -693,7 +693,7 @@ This is the primary and most flexible endpoint for TTS generation, offering full
     | `voice_mode`                | `"predefined"` \| `"clone"`      | No          | Specifies the voice generation mode.                                                                          | `"predefined"`                               |
     | `predefined_voice_id`       | string \| null                   | Conditional | Filename of the voice from `voices/`. Required if `voice_mode` is `predefined`.                             | `tts_engine.default_voice_id`                |
     | `reference_audio_filename`  | string \| null                   | Conditional | Filename of the audio from `reference_audio/`. Required if `voice_mode` is `clone`.                           | `null`                                       |
-    | `output_format`             | `"wav"` \| `"opus"` \| `"mp3"` \| `"pcm"` | No          | Desired audio output format. PCM is raw signed 16-bit little-endian mono audio without a WAV header.           | `audio_output.format`                        |
+    | `output_format`             | `"wav"` \| `"opus"`              | No          | Desired audio output format.                                                                                  | `audio_output.format`                        |
     | `split_text`                | boolean \| null                  | No          | Enable/disable automatic text chunking.                                                                       | `true`                                       |
     | `chunk_size`                | integer \| null                  | No          | Approximate target character length for chunks (50-500 recommended).                                          | `120`                                        |
     | `temperature`               | float \| null                    | No          | Overrides default temperature.                                                                                | `generation_defaults.temperature`            |
@@ -704,7 +704,7 @@ This is the primary and most flexible endpoint for TTS generation, offering full
     | `language`                  | string \| null                   | No          | Overrides default language.                                                                                   | `generation_defaults.language`               |
 
 *   **Response:**
-    *   **Success (200 OK):** `StreamingResponse` containing binary audio data (media type `audio/wav`, `audio/opus`, `audio/mp3`, or raw `audio/pcm`) with appropriate `Content-Disposition` headers for download.
+    *   **Success (200 OK):** `StreamingResponse` containing binary audio data (media type `audio/wav` or `audio/opus`) with appropriate `Content-Disposition` headers for download.
     *   **Error:** Standard FastAPI JSON error response (e.g., 400 for bad input, 404 for missing voice file, 500 for server error, 503 if model not loaded).
 
 #### 8.2.4 Helper Endpoints
@@ -818,7 +818,7 @@ This section outlines the software architecture of the Chatterbox TTS Server.
     *   Optional post-processing (silence trimming, etc.) is applied if configured.
     *   Processed audio segments (if chunked) are concatenated.
 6.  **Encoding (`utils.py`):**
-    *   The final NumPy audio array is encoded into the desired `output_format` by `encode_audio()`, which also handles resampling to the target output sample rate.
+    *   The final NumPy audio array is encoded into the desired `output_format` (WAV or Opus) by `encode_audio()`, which also handles resampling to the target output sample rate.
 7.  **FastAPI Response (`server.py`):**
     *   The encoded audio bytes are streamed back to the client as a `StreamingResponse` with appropriate media type and download headers.
 8.  **Client (Web UI - `script.js`):**

@@ -94,6 +94,11 @@ class CustomTTSRequest(BaseModel):
         None, description="Overrides default language if provided."
     )
 
+    stream: bool = Field(
+        False,
+        description="If true, returns a StreamingResponse yielded as each chunk is synthesized. WAV and raw PCM streaming are supported.",
+    )
+
 
 class ErrorResponse(BaseModel):
     """Standard error response model for API errors."""
