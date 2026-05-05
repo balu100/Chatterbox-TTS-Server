@@ -83,6 +83,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "audio_output": {  # Settings related to the format of generated audio.
         "format": "wav",  # Output audio format (e.g., 'wav', 'mp3').
         "sample_rate": 24000,  # Sample rate of the output audio in Hz.
+        "volume": 1.0,  # Final output gain multiplier. 1.0 = unchanged.
         "max_reference_duration_sec": 30,  # Maximum duration for reference audio files.
         "save_to_disk": False,  # If true, save generated audio files to disk in outputs folder.
     },
@@ -760,6 +761,13 @@ def get_audio_output_format() -> str:
     )
 
 
+def get_audio_output_volume() -> float:
+    """Returns the final output gain multiplier."""
+    return config_manager.get_float(
+        "audio_output.volume", _get_default_from_structure("audio_output.volume")
+    )
+
+
 def get_log_file_path() -> Path:
     """Returns the absolute path to the server log file."""
     default_path_str = str(_get_default_from_structure("server.log_file_path"))
@@ -888,6 +896,13 @@ def get_audio_output_format() -> str:
     """Returns the default audio output format (e.g., 'wav')."""
     return config_manager.get_string(
         "audio_output.format", _get_default_from_structure("audio_output.format")
+    )
+
+
+def get_audio_output_volume() -> float:
+    """Returns the final output gain multiplier."""
+    return config_manager.get_float(
+        "audio_output.volume", _get_default_from_structure("audio_output.volume")
     )
 
 

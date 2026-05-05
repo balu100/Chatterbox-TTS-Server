@@ -60,6 +60,7 @@ from config import (
     get_audio_sample_rate,
     get_full_config_for_template,
     get_audio_output_format,
+    get_audio_output_volume,
 )
 
 import engine  # TTS Engine interface
@@ -405,6 +406,14 @@ def _float32_to_pcm16(audio_np: np.ndarray) -> bytes:
     """Convert a float32 numpy array in [-1, 1] to int16 PCM bytes."""
     clipped = np.clip(audio_np, -1.0, 1.0)
     return (clipped * 32767).astype("<i2").tobytes()
+
+
+def _apply_output_volume(audio_np: np.ndarray, volume: float) -> np.ndarray:
+    if volume == 1.0:
+        return audio_np.astype(np.float32, copy=False)
+    return (audio_np.astype(np.float32, copy=False) * volume).astype(
+        np.float32, copy=False
+    )
 
 
 def _pcm_response_headers(sample_rate: int) -> Dict[str, str]:
@@ -1008,6 +1017,7 @@ async def custom_tts_endpoint(
         language_val = (
             request.language if request.language is not None else get_gen_default_language()
         )
+        output_volume = get_audio_output_volume()
 
         CROSSFADE_MS_STREAM = 20
 
@@ -1058,12 +1068,16 @@ async def custom_tts_endpoint(
 
                 if not is_last and len(audio_np) > fade_samples:
                     carry = audio_np[-fade_samples:].copy()
-                    yield _float32_to_pcm16(audio_np[:-fade_samples])
+                    yield _float32_to_pcm16(
+                        _apply_output_volume(audio_np[:-fade_samples], output_volume)
+                    )
                 else:
-                    yield _float32_to_pcm16(audio_np)
+                    yield _float32_to_pcm16(
+                        _apply_output_volume(audio_np, output_volume)
+                    )
 
             if carry is not None:
-                yield _float32_to_pcm16(carry)
+                yield _float32_to_pcm16(_apply_output_volume(carry, output_volume))
 
         timestamp_str = time.strftime("%Y%m%d_%H%M%S")
         stream_filename = utils.sanitize_filename(
@@ -1325,6 +1339,7 @@ async def custom_tts_endpoint(
     output_format_str = (
         request.output_format if request.output_format else get_audio_output_format()
     )
+    final_audio_np = _apply_output_volume(final_audio_np, get_audio_output_volume())
 
     encoded_audio_bytes = utils.encode_audio(
         audio_array=final_audio_np,
@@ -1502,6 +1517,7 @@ async def openai_speech_endpoint(request: OpenAISpeechRequest):
         peak = np.abs(final_audio_np).max()
         if peak > 0.99:
             final_audio_np = final_audio_np * (0.95 / peak)
+        final_audio_np = _apply_output_volume(final_audio_np, get_audio_output_volume())
 
         target_sample_rate = get_audio_sample_rate()
         encoded_audio = utils.encode_audio(

@@ -30,6 +30,7 @@ generation_defaults:
 audio_output:
   format: wav
   sample_rate: 24000
+  volume: 3.0
   max_reference_duration_sec: 30
   save_to_disk: false
 ui_state:
