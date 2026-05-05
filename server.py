@@ -7,6 +7,7 @@ import os
 import io
 import logging
 import logging.handlers  # For RotatingFileHandler
+import queue
 import shutil
 import time
 import uuid
@@ -15,7 +16,7 @@ import numpy as np
 import librosa  # For potential direct use if needed, though utils.py handles most
 from pathlib import Path
 from contextlib import asynccontextmanager
-from typing import Optional, List, Dict, Any, Literal
+from typing import Optional, List, Dict, Any, Literal, Iterator
 import webbrowser  # For automatic browser opening
 import threading  # For automatic browser opening
 
@@ -75,9 +76,205 @@ class OpenAISpeechRequest(BaseModel):
     model: str
     input_: str = Field(..., alias="input")
     voice: str
-    response_format: Literal["wav", "opus", "mp3"] = "wav"  # Add "mp3"
+    response_format: Literal["wav", "opus", "mp3", "pcm"] = "wav"
     speed: float = 1.0
     seed: Optional[int] = None
+
+
+OPENAI_PCM_SAMPLE_RATE = 24000
+OPENAI_PCM_STREAM_PAUSE_MS = 200
+OPENAI_PCM_STREAM_TEXT_CHUNK_SIZE = 80
+OPENAI_PCM_FRAME_MS = 20
+
+
+def _pcm_response_headers(sample_rate: int) -> Dict[str, str]:
+    return {
+        "X-Audio-Sample-Rate": str(sample_rate),
+        "X-Audio-Channels": "1",
+        "X-Audio-Bit-Depth": "16",
+        "X-Audio-Sample-Format": "s16le",
+        "X-Audio-Byte-Order": "little-endian",
+        "X-Audio-Streaming": "chunked-pcm-frames",
+        "X-Audio-Frame-Ms": str(OPENAI_PCM_FRAME_MS),
+        "X-Audio-Frame-Pacing": "none",
+        "X-Audio-Text-Chunk-Chars": str(OPENAI_PCM_STREAM_TEXT_CHUNK_SIZE),
+    }
+
+
+def _split_long_streaming_chunks(chunks: List[str], max_chars: int) -> List[str]:
+    streaming_chunks: List[str] = []
+    for chunk in chunks:
+        if len(chunk) <= max_chars:
+            streaming_chunks.append(chunk)
+            continue
+
+        current_words: List[str] = []
+        current_length = 0
+        for word in chunk.split():
+            word_length = len(word)
+            projected_length = current_length + word_length + (1 if current_words else 0)
+            if current_words and projected_length > max_chars:
+                streaming_chunks.append(" ".join(current_words))
+                current_words = [word]
+                current_length = word_length
+            else:
+                current_words.append(word)
+                current_length = projected_length
+
+        if current_words:
+            streaming_chunks.append(" ".join(current_words))
+
+    return [chunk for chunk in streaming_chunks if chunk.strip()]
+
+
+def _iter_pcm_frames(
+    pcm_bytes: bytes, sample_rate: int, frame_ms: int
+) -> Iterator[bytes]:
+    bytes_per_frame = max(2, int(sample_rate * frame_ms / 1000) * 2)
+
+    for offset in range(0, len(pcm_bytes), bytes_per_frame):
+        frame = pcm_bytes[offset : offset + bytes_per_frame]
+        if not frame:
+            continue
+        yield frame
+
+
+def _iter_openai_pcm_stream(
+    *,
+    text_chunks: List[str],
+    audio_prompt_path: Path,
+    speed: float,
+    seed_to_use: Optional[int],
+    target_sample_rate: int,
+    output_file_path: Optional[Path] = None,
+) -> Iterator[bytes]:
+    """
+    Streams OpenAI-compatible raw PCM one synthesized text chunk at a time.
+
+    Chatterbox generation itself is still blocking per chunk; this avoids waiting
+    for all chunks to synthesize, stitch, and encode before the response starts.
+    """
+    pcm_queue: queue.Queue = queue.Queue(maxsize=2)
+    stop_event = threading.Event()
+    end_marker = object()
+    total_bytes = 0
+    silence_bytes = b"\x00\x00" * int(
+        OPENAI_PCM_STREAM_PAUSE_MS / 1000 * target_sample_rate
+    )
+
+    def queue_stream_item(item: object) -> bool:
+        while not stop_event.is_set():
+            try:
+                pcm_queue.put(item, timeout=0.1)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def produce_pcm_chunks() -> None:
+        try:
+            for i, chunk_text in enumerate(text_chunks):
+                if stop_event.is_set():
+                    break
+
+                chunk_seed = (
+                    seed_to_use + i
+                    if seed_to_use is not None and seed_to_use >= 0
+                    else seed_to_use
+                )
+                chunk_start = time.time()
+                logger.info(
+                    f"OpenAI PCM stream: synthesizing chunk {i + 1}/{len(text_chunks)}"
+                )
+
+                audio_tensor, sr = engine.synthesize(
+                    text=chunk_text,
+                    audio_prompt_path=str(audio_prompt_path),
+                    temperature=get_gen_default_temperature(),
+                    exaggeration=get_gen_default_exaggeration(),
+                    cfg_weight=get_gen_default_cfg_weight(),
+                    seed=chunk_seed,
+                    language=get_gen_default_language(),
+                )
+
+                if audio_tensor is None or sr is None:
+                    raise RuntimeError(
+                        f"TTS engine failed to synthesize audio for chunk {i + 1}."
+                    )
+
+                if speed != 1.0:
+                    audio_tensor, _ = utils.apply_speed_factor(audio_tensor, sr, speed)
+
+                chunk_np = audio_tensor.cpu().numpy().squeeze().astype(np.float32)
+                encoded_chunk = utils.encode_audio(
+                    audio_array=chunk_np,
+                    sample_rate=sr,
+                    output_format="pcm",
+                    target_sample_rate=target_sample_rate,
+                )
+                if not encoded_chunk:
+                    raise RuntimeError(f"Failed to encode PCM for chunk {i + 1}.")
+
+                logger.info(
+                    f"OpenAI PCM stream: queued chunk {i + 1}/{len(text_chunks)} "
+                    f"({len(encoded_chunk)} bytes, {time.time() - chunk_start:.3f}s)"
+                )
+                if not queue_stream_item(encoded_chunk):
+                    break
+
+                if i < len(text_chunks) - 1 and silence_bytes:
+                    if not queue_stream_item(silence_bytes):
+                        break
+
+        except Exception as e:
+            queue_stream_item(e)
+        finally:
+            queue_stream_item(end_marker)
+
+    producer_thread = threading.Thread(
+        target=produce_pcm_chunks,
+        name="openai-pcm-stream-producer",
+        daemon=True,
+    )
+    producer_thread.start()
+    output_file = None
+
+    try:
+        if output_file_path is not None:
+            output_file_path.parent.mkdir(parents=True, exist_ok=True)
+            output_file = open(output_file_path, "wb")
+
+        while True:
+            stream_item = pcm_queue.get()
+            if stream_item is end_marker:
+                break
+            if isinstance(stream_item, Exception):
+                raise stream_item
+            if not isinstance(stream_item, bytes):
+                raise RuntimeError(f"Unexpected PCM stream item: {type(stream_item)}")
+
+            for frame in _iter_pcm_frames(
+                stream_item, target_sample_rate, OPENAI_PCM_FRAME_MS
+            ):
+                if output_file is not None:
+                    output_file.write(frame)
+                    output_file.flush()
+                total_bytes += len(frame)
+                yield frame
+
+        logger.info(
+            f"OpenAI PCM stream complete: {len(text_chunks)} chunk(s), {total_bytes} bytes."
+        )
+        if output_file_path is not None:
+            logger.info(f"OpenAI-compatible PCM stream saved to disk: {output_file_path}")
+
+    except Exception as e:
+        logger.error(f"Error while streaming OpenAI PCM audio: {e}", exc_info=True)
+        raise
+    finally:
+        stop_event.set()
+        if output_file is not None:
+            output_file.close()
 
 
 # --- Logging Configuration ---
@@ -823,7 +1020,12 @@ async def upload_predefined_voice_endpoint(files: List[UploadFile] = File(...)):
     summary="Generate speech with custom parameters",
     responses={
         200: {
-            "content": {"audio/wav": {}, "audio/opus": {}},
+            "content": {
+                "audio/wav": {},
+                "audio/opus": {},
+                "audio/mp3": {},
+                "audio/pcm": {},
+            },
             "description": "Successful audio generation.",
         },
         400: {
@@ -850,7 +1052,7 @@ async def custom_tts_endpoint(
     """
     Generates speech audio from text using specified parameters.
     Handles various voice modes (predefined, clone) and audio processing options.
-    Returns audio as a stream (WAV or Opus).
+    Returns audio as a stream in the requested output format.
     """
     perf_monitor = utils.PerformanceMonitor(
         enabled=config_manager.get_bool("server.enable_performance_monitor", False)
@@ -1223,6 +1425,8 @@ async def custom_tts_endpoint(
         f"{suggested_filename_base}.{output_format_str}"
     )
     headers = {"Content-Disposition": f'attachment; filename="{download_filename}"'}
+    if output_format_str == "pcm":
+        headers.update(_pcm_response_headers(final_output_sample_rate))
 
     logger.info(
         f"Successfully generated audio: {download_filename}, {len(encoded_audio_bytes)} bytes, type {media_type}."
@@ -1299,9 +1503,19 @@ async def openai_speech_endpoint(request: OpenAISpeechRequest):
             request.seed if request.seed is not None else get_gen_default_seed()
         )
 
-        # Split long text into chunks for better quality (same as /tts endpoint)
+        # Split long text into chunks for better quality. PCM streaming uses smaller
+        # chunks so the first Chatterbox call has less text to synthesize.
         DEFAULT_CHUNK_SIZE = 120
-        text_chunks = utils.chunk_text_by_sentences(request.input_, DEFAULT_CHUNK_SIZE)
+        chunk_size = (
+            OPENAI_PCM_STREAM_TEXT_CHUNK_SIZE
+            if request.response_format == "pcm"
+            else DEFAULT_CHUNK_SIZE
+        )
+        text_chunks = utils.chunk_text_by_sentences(request.input_, chunk_size)
+        if request.response_format == "pcm":
+            text_chunks = _split_long_streaming_chunks(
+                text_chunks, OPENAI_PCM_STREAM_TEXT_CHUNK_SIZE
+            )
         if not text_chunks:
             raise HTTPException(
                 status_code=400, detail="Text processing resulted in no usable chunks."
@@ -1310,6 +1524,34 @@ async def openai_speech_endpoint(request: OpenAISpeechRequest):
         logger.info(
             f"OpenAI speech: processing {len(text_chunks)} chunk(s) for input of {len(request.input_)} chars"
         )
+
+        if request.response_format == "pcm":
+            target_sample_rate = OPENAI_PCM_SAMPLE_RATE
+            output_file_path = None
+            if config_manager.get_bool("audio_output.save_to_disk", False):
+                output_dir = get_output_path(ensure_absolute=True)
+                timestamp_str = time.strftime("%Y%m%d_%H%M%S")
+                output_file_path = output_dir / f"openai_tts_{timestamp_str}.pcm"
+
+            headers = _pcm_response_headers(target_sample_rate)
+            headers.update(
+                {
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                }
+            )
+            return StreamingResponse(
+                _iter_openai_pcm_stream(
+                    text_chunks=text_chunks,
+                    audio_prompt_path=audio_prompt_path,
+                    speed=request.speed,
+                    seed_to_use=seed_to_use,
+                    target_sample_rate=target_sample_rate,
+                    output_file_path=output_file_path,
+                ),
+                media_type="audio/pcm",
+                headers=headers,
+            )
 
         all_audio_segments_np: List[np.ndarray] = []
         engine_sr: Optional[int] = None
@@ -1367,11 +1609,13 @@ async def openai_speech_endpoint(request: OpenAISpeechRequest):
         if peak > 0.99:
             final_audio_np = final_audio_np * (0.95 / peak)
 
+        target_sample_rate = get_audio_sample_rate()
+
         encoded_audio = utils.encode_audio(
             audio_array=final_audio_np,
             sample_rate=engine_sr,
             output_format=request.response_format,
-            target_sample_rate=get_audio_sample_rate(),
+            target_sample_rate=target_sample_rate,
         )
 
         if encoded_audio is None:
@@ -1413,7 +1657,9 @@ async def openai_speech_endpoint(request: OpenAISpeechRequest):
                     status_code=500, detail=f"Failed to save audio file: {e}"
                 )
 
-        return StreamingResponse(io.BytesIO(encoded_audio), media_type=media_type)
+        return StreamingResponse(
+            io.BytesIO(encoded_audio), media_type=media_type
+        )
 
     except Exception as e:
         logger.error(f"Error in openai_speech_endpoint: {e}", exc_info=True)
